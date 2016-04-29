@@ -5,6 +5,8 @@ import java.awt.Color;
 import java.awt.GridLayout;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.io.IOException;
+import java.net.UnknownHostException;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -81,9 +83,12 @@ public class TextFrame extends JFrame implements ActionListener {
 		JsonParser jp = new JsonParser();
 		JsonElement je = jp.parse(obj.toJSONString());
 		String prettyJsonString = gson.toJson(je);
-		outputText.setText(prettyJsonString);
+		outputText.setText(outputText.getText()+prettyJsonString + "\n"); 
 		outputText.revalidate();
 		outputText.repaint();
+		
+		
+		
 	}
 	
 	@Override
@@ -94,12 +99,27 @@ public class TextFrame extends JFrame implements ActionListener {
 			try {
 				obj = (JSONObject) parser.parse(msg);
 				ClientSolution.getInstance().sendActivityObject(obj);
+				log.info("Valid Json, the content is :" +msg);
 			} catch (ParseException e1) {
 				log.error("invalid JSON object entered into input text field, data not sent");
+			} catch (IOException e1) {
+				// TODO Auto-generated catch block
+				e1.printStackTrace();
+			} catch (Exception e1) {
+				// TODO Auto-generated catch block
+				e1.printStackTrace();
 			}
 			
 		} else if(e.getSource()==disconnectButton){
-			ClientSolution.getInstance().disconnect();
+			try {
+				ClientSolution.getInstance().disconnect();
+			} catch (UnknownHostException e1) {
+				// TODO Auto-generated catch block
+				e1.printStackTrace();
+			} catch (IOException e1) {
+				// TODO Auto-generated catch block
+				e1.printStackTrace();
+			}
 		}
 	}
 }

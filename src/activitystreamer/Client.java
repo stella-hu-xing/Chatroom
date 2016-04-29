@@ -1,5 +1,8 @@
 package activitystreamer;
 
+import java.io.IOException;
+import java.net.UnknownHostException;
+
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.DefaultParser;
@@ -75,7 +78,15 @@ public class Client {
 		 * maybe change the line below to suit your program
 		 */
 		
-		ClientSolution c = ClientSolution.getInstance(); 
+		try {
+			ClientSolution c = ClientSolution.getInstance();
+		} catch (UnknownHostException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} 
 				
 	}
 

@@ -65,8 +65,12 @@ public class Connection extends Thread {
 	public void run(){
 		try {
 			String data;
+			
 			while(!term && (data = inreader.readLine())!=null){
+			
+				log.info("this time read:"+data);
 				term=Control.getInstance().process(this,data);
+				
 			}
 			log.debug("connection closed to "+Settings.socketAddress(socket));
 			Control.getInstance().connectionClosed(this);
@@ -77,6 +81,8 @@ public class Connection extends Thread {
 		}
 		open=false;
 	}
+	
+	
 	
 	public Socket getSocket() {
 		return socket;
