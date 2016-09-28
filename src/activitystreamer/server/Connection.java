@@ -74,6 +74,7 @@ public class Connection extends Thread {
 			}
 			log.debug("connection closed to "+Settings.socketAddress(socket));
 			Control.getInstance().connectionClosed(this);
+		    ControlSolution.getInstance().ReConnect(this);
 			in.close();
 		} catch (IOException e) {
 			log.error("connection "+Settings.socketAddress(socket)+" closed with exception: "+e);

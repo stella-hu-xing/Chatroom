@@ -2,17 +2,28 @@ package activitystreamer.server;
 
 import java.io.IOException;
 import java.net.Socket;
-import java.time.chrono.MinguoChronology;
+import java.net.UnknownHostException;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Hashtable;
 import java.util.Iterator;
+import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
 
+import activitystreamer.util.EncryptionUtil;
 import activitystreamer.util.Settings;
 
 public class ControlSolution extends Control {
@@ -21,19 +32,20 @@ public class ControlSolution extends Control {
 
 		String id;
 		int load;
+		int serverload;
 		String hostname;
 		int port;
 
 		public ServerContent() {
 		}
 
-		public ServerContent(String id, int load, String hostname, int port) {
+		public ServerContent(String id, int clientload, int serverload, String hostname, int port) {
 			this.id = id;
-			this.load = load;
+			this.load = clientload;
+			this.serverload = serverload;
 			this.hostname = hostname;
 			this.port = port;
 		}
-
 	}
 
 	//////
@@ -41,20 +53,33 @@ public class ControlSolution extends Control {
 	private static final Logger log = LogManager.getLogger();
 
 	private static Hashtable<String, String> AllUserList;
-	private static ArrayList<Connection> AnonymousClients;;
+	private static ArrayList<Connection> AnonymousClients;
 	private static Hashtable<String, Connection> CurrentClients;
 
 	private static ArrayList<Connection> CurrentServers;
 	private static ArrayList<ServerContent> AllOtherServers;
+
+	private Hashtable<Connection, PublicKey> KeyList;
 
 	private JSONParser parser = new JSONParser();
 	// the secret for all server network
 	private String SSecret;
 	private String ID;
 
-	private String[] waitingClient = waitingClient = new String[2];
+	public String backuphost;
+	public int backupport;
+
+	private Connection parentCon;
+
+	private ArrayList<String> waitingClient;
 	private int counter, counter1;
 	private boolean lockis = true;
+
+	private KeyPair keys;
+	private PrivateKey ownPrivateKey;
+	private PublicKey ownPublicKey;
+
+	private static Hashtable<Connection, Boolean> isNew;
 
 	// since control and its subclasses are singleton, we get the singleton this
 	// way
@@ -86,9 +111,19 @@ public class ControlSolution extends Control {
 		AllOtherServers = new ArrayList<ServerContent>();
 		AnonymousClients = new ArrayList<Connection>();
 		CurrentServers = new ArrayList<Connection>();
+		waitingClient = new ArrayList<String>();
+		KeyList = new Hashtable<Connection, PublicKey>();
+		isNew = new Hashtable<Connection, Boolean>();
+
+		keys = EncryptionUtil.generateKey();
+		ownPublicKey = keys.getPublic();
+		ownPrivateKey = keys.getPrivate();
+
 		initiateConnection();
-		// start the server's activity loop
-		// it will call doActivity every few seconds
+
+		backuphost = new String("localhost");
+		backupport = 3780;
+
 		start();
 	}
 
@@ -99,6 +134,7 @@ public class ControlSolution extends Control {
 	public Connection incomingConnection(Socket s) throws IOException {
 		Connection con = super.incomingConnection(s);
 
+		isNew.put(con, false);
 		System.out.println("I receive a incomming connection");
 
 		return con;
@@ -111,20 +147,13 @@ public class ControlSolution extends Control {
 	public Connection outgoingConnection(Socket s) throws IOException {
 		Connection con = super.outgoingConnection(s);
 
-		sendAuthenticateMsg(con, Settings.getSecret());
+		isNew.put(con, true);
+		sendPublicKey(con);
 
 		CurrentServers.add(con);
+		parentCon = con;
 
 		return con;
-	}
-
-	private void sendAuthenticateMsg(Connection con, String secret) {
-		// TODO Auto-generated method stub
-		JSONObject obj = new JSONObject();
-		obj.put("command", "AUTHENTICATE");
-		obj.put("secret", secret);
-
-		con.writeMsg(obj.toJSONString());
 	}
 
 	/*
@@ -133,10 +162,12 @@ public class ControlSolution extends Control {
 	@Override
 	public void connectionClosed(Connection con) {
 		super.connectionClosed(con);
-
-		if (CurrentClients.contains(con)) {
-			CurrentClients.remove(con);
+		// for server
+		if (CurrentServers.contains(con)) {
+			CurrentServers.remove(con);
 		}
+		// for client
+		Logout(con);
 	}
 
 	/*
@@ -146,83 +177,189 @@ public class ControlSolution extends Control {
 	@Override
 	public synchronized boolean process(Connection con, String msg) {
 
-		/*
-		 * cut the String into command + username +content
-		 */
-		JSONObject obj;
+		// cut the String into command + username +content
 
-		try {
-			obj = (JSONObject) parser.parse(msg);
-			if (!obj.containsKey("command")) {
-				sendMessage(con, "INVALID_MESSAGE", "the received message did not contain a command");
-			} else {
-				String coms = (String) obj.get("command");
-
-				switch (coms) {
-				case "AUTHENTICATE":
-
-					ReceiveAuthenticate(con, obj);
-					break;
-
-				case "LOGIN":
-
-					Login(con, obj);
-					break;
-
-				case "LOGOUT":
-
-					Logout(con, obj);
-					break;
-
-				case "ACTIVITY_MESSAGE":
-
-					ReceiveActivityMessage(con, obj);
-					break;
-
-				case "SERVER_ANNOUNCE":
-
-					ReceiveServerAnnounce(con, obj);
-					break;
-
-				case "ACTIVITY_BROADCAST":
-
-					ReceiveActivityBroadCast(con, obj);
-					break;
-
-				case "REGISTER":
-					Register(con, obj);
-					break;
-
-				case "LOCK_REQUEST":
-
-					ReceiveLockRequest(obj);
-					break;
-
-				case "LOCK_DENIED":
-
-					ReceiveLockDenied(obj);
-					break;
-
-				case "LOCK_ALLOWED":
-
-					ReceiveLockAllowed(obj);
-					break;
-				default:
-					// sendMessage(con, "INVALID_MESSAGE", "You send a invalid
-					// message");
-					// connectionClosed(con);
-					break;
+		if (isNew.get(con).equals(false)) {
+			try {
+				JSONObject obj = (JSONObject) parser.parse(msg);
+				if (obj.containsKey("command") && obj.get("command").equals("REQUEST_PUBKEY")) {
+					isNew.put(con, true);
+					System.out.println("A new server/ client！！");
+					ReceivepubKey(con, obj);
+					answerPublicKey(con);
+					// } else if (obj.containsKey("command") &&
+					// obj.get("command").equals("ANSWER_PUBKEY")) {
+					// ReceivepubKey(con, obj);
+					// isNew.put(con, true);
+					// sendAuthenticateMsg(con,SSecret);
+				} else {
+					System.out.println("A old server/ client ！！");
+					dealWithCommand(con, obj);
 				}
+			} catch (ParseException e) {
+				e.printStackTrace();
+			}
+		} else {
+			System.out.println("You are HERE！！");
+
+			try {
+				System.out.println("Read:   " + msg);
+				msg = EncryptionUtil.decyrpt(msg, ownPrivateKey).toString().trim();
+				// msg= msg.trim();
+				System.out.println("Read again:   " + msg);
+				JSONObject obj = (JSONObject) parser.parse(msg);
+
+				dealWithCommand(con, obj);
+
+			} catch (ParseException e) {
+
+				e.printStackTrace();
 			}
 
-		} catch (ParseException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-			sendMessage(con, "INVALID_MESSAGE", "JSON parse error while parsing message");
-			connectionClosed(con);
 		}
 
 		return false;
+
+	}
+
+	//
+	public void dealWithCommand(Connection con, JSONObject obj) throws ParseException {
+
+		System.out.println("Begin process----");
+		String coms = (String) obj.get("command");
+
+		switch (coms) {
+		case "ANSWER_PUBKEY":
+			ReceivepubKey(con, obj);
+			isNew.put(con, true);
+			sendAuthenticateMsg(con, Settings.getSecret());
+
+			break;
+
+		case "AUTHENTICATE":
+
+			ReceiveAuthenticate(con, obj);
+			break;
+
+		case "AUTHENTICATE_SUCCESS":
+			ReceiveAuthenSuccess(con, obj);
+			break;
+
+		case "LOGIN":
+
+			Login(con, obj);
+			break;
+
+		case "REDIRECT":
+
+			DoRedirect(con, obj);
+			break;
+
+		case "LOGOUT":
+
+			Logout(con);
+			break;
+
+		case "ACTIVITY_MESSAGE":
+
+			ReceiveActivityMessage(con, obj);
+			break;
+
+		case "SERVER_ANNOUNCE":
+
+			ReceiveServerAnnounce(con, obj);
+			break;
+
+		case "ACTIVITY_BROADCAST":
+
+			ReceiveActivityBroadCast(con, obj);
+			break;
+
+		case "REGISTER":
+			Register(con, obj);
+			break;
+
+		case "LOCK_REQUEST":
+
+			ReceiveLockRequest(obj);
+			break;
+
+		case "LOCK_DENIED":
+
+			ReceiveLockDenied(obj);
+			break;
+
+		case "LOCK_ALLOWED":
+
+			ReceiveLockAllowed(obj);
+			break;
+		default:
+			sendMessage(con, "INVALID_MESSAGE", "You send a invalid message");
+			break;
+		}
+	}
+
+	// at the first stage, receive pubkey from client( or server)
+	private void ReceivepubKey(Connection con, JSONObject obj) {
+
+		String key = (String) obj.get("publickey");
+
+		byte[] publicBytes = Base64.getDecoder().decode(key);
+
+		X509EncodedKeySpec keySpec = new X509EncodedKeySpec(publicBytes);
+
+		KeyFactory keyFactory;
+
+		try {
+			keyFactory = KeyFactory.getInstance("RSA");
+
+			PublicKey pubKey = keyFactory.generatePublic(keySpec);
+
+			KeyList.put(con, pubKey);
+
+		} catch (NoSuchAlgorithmException | InvalidKeySpecException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
+	}
+
+	// send my Public key to another server or back to client
+	private void answerPublicKey(Connection con) {
+
+		String encodedKey = Base64.getEncoder().encodeToString(ownPublicKey.getEncoded());
+
+		JSONObject obj = new JSONObject();
+
+		obj.put("command", "ANSWER_PUBKEY");
+
+		obj.put("publickey", encodedKey);
+
+		con.writeMsg(EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(con)).toString());
+
+	}
+
+	private void sendPublicKey(Connection con) {
+
+		String encodedKey = Base64.getEncoder().encodeToString(ownPublicKey.getEncoded());
+
+		JSONObject obj = new JSONObject();
+		obj.put("command", "REQUEST_PUBKEY");
+		obj.put("publickey", encodedKey);
+
+		// con.writeMsg(EncryptionUtil.encyrpt(obj.toJSONString(),
+		// KeyList.get(con)).toString());
+		con.writeMsg(obj.toJSONString());
+	}
+
+	private void sendAuthenticateMsg(Connection con, String secret) {
+		// TODO Auto-generated method stub
+		JSONObject obj = new JSONObject();
+		obj.put("command", "AUTHENTICATE");
+		obj.put("secret", secret);
+
+		// con.writeMsg(obj.toJSONString());
+		con.writeMsg(EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(con)).toString());
 	}
 
 	private void ReceiveLockDenied(JSONObject obj) {
@@ -230,10 +367,11 @@ public class ControlSolution extends Control {
 		if (obj.get("username") != null && obj.get("secret") != null) {
 			System.out.println("Receive Lock Denide for " + obj.get("username") + " :" + obj.get("secret"));
 			// receive the message is from my request
-			if (waitingClient[0].equals(obj.get("username"))) {
+			if (waitingClient.contains(obj.get("username"))) {
 				counter++;
 				lockis = false;
-				AllUserList.remove(waitingClient[0], waitingClient[1]);
+				AllUserList.remove(obj.get("username"), obj.get("secret"));
+				waitingClient.remove(obj.get("username"));
 			} else {
 				// receive the message if from other servers' request
 				if (AllUserList.containsKey((String) obj.get("username"))) {
@@ -248,7 +386,7 @@ public class ControlSolution extends Control {
 		if (obj.get("username") != null && obj.get("secret") != null) {
 			System.out.println("Receive Lock Allowed for " + obj.get("username") + " :" + obj.get("secret"));
 			// receive the message is from my request
-			if (waitingClient[0].equals(obj.get("username"))) {
+			if (waitingClient.contains(obj.get("username"))) {
 				counter1++;
 				lockis = true;
 			}
@@ -262,30 +400,27 @@ public class ControlSolution extends Control {
 	private void ReceiveLockRequest(JSONObject obj) {
 
 		// check the <username, secret> is already locked
-		boolean islocked = false;
-		// using array to store waiting client ' username and secret
 
-		if (waitingClient[0] != null && waitingClient[1] != null) {
+		// using array to store waiting client ' username and connection
+
+		if (obj.get("username") != null && obj.get("secret") != null) {
 			System.out.println("Receive Lock Request for " + obj.get("username") + " :" + obj.get("secret"));
-			if (AllUserList.get("username").equals(waitingClient[0])) {
-				islocked = true;
+			if (AllUserList.containsKey(obj.get("username")) || waitingClient.contains(obj.get("username"))) {
+				sendLockDenied((String) obj.get("username"), (String) obj.get("secret"));
+				log.info("send lock denied for: " + (String) obj.get("username") + (String) obj.get("secret"));
+			} else {
+				System.out.println("no username or secret");
+				AllUserList.put((String) obj.get("username"), (String) obj.get("secret"));
+				sendLockAllowed((String) obj.get("username"), (String) obj.get("secret"));
+				log.info("send lock allowed for: " + (String) obj.get("username") + (String) obj.get("secret"));
 			}
-		} else {
-			log.info("no username or secret");
-			AllUserList.put((String) obj.get("username"), (String) obj.get("secret"));
 		}
-		if (islocked == true)
-			sendLockDenied(waitingClient[0], waitingClient[1]);
-		else
-			sendLockAllowed(waitingClient[0], waitingClient[1]);
-
 	}
 
 	public void SendLockRequest(String username, String secret) {
 		// TODO Auto-generated method stub
 		System.out.println("now begin to send lock request");
-		waitingClient[0] = username;
-		waitingClient[1] = secret;
+		waitingClient.add(username);
 		// chech self
 		// check other servers
 		if (CurrentServers.size() != 0) {
@@ -295,9 +430,14 @@ public class ControlSolution extends Control {
 			obj.put("secret", secret);
 
 			for (int i = 0; i < CurrentServers.size(); i++) {
-				CurrentServers.get(i).writeMsg(obj.toJSONString());
-			}
+				if (isNew.get(CurrentServers.get(i)) == false) {
+					CurrentServers.get(i).writeMsg(obj.toJSONString());
+				} else {
+					CurrentServers.get(i).writeMsg(
+							EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(CurrentServers.get(i))).toString());
+				}
 
+			}
 		}
 	}
 
@@ -309,7 +449,12 @@ public class ControlSolution extends Control {
 		obj.put("server", ID);
 
 		for (int i = 0; i < CurrentServers.size(); i++) {
-			CurrentServers.get(i).writeMsg(obj.toJSONString());
+			if (isNew.get(CurrentServers.get(i)) == false) {
+				CurrentServers.get(i).writeMsg(obj.toJSONString());
+			} else {
+				CurrentServers.get(i).writeMsg(
+						EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(CurrentServers.get(i))).toString());
+			}
 		}
 	}
 
@@ -321,7 +466,12 @@ public class ControlSolution extends Control {
 		obj.put("server", ID);
 
 		for (int i = 0; i < CurrentServers.size(); i++) {
-			CurrentServers.get(i).writeMsg(obj.toJSONString());
+			if (isNew.get(CurrentServers.get(i)) == false) {
+				CurrentServers.get(i).writeMsg(obj.toJSONString());
+			} else {
+				CurrentServers.get(i).writeMsg(
+						EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(CurrentServers.get(i))).toString());
+			}
 		}
 
 	}
@@ -354,20 +504,35 @@ public class ControlSolution extends Control {
 		js.put("activity", obj);
 
 		for (int j = 0; j < CurrentServers.size(); j++) {
-			CurrentServers.get(j).writeMsg(js.toJSONString());
+			if (isNew.get(CurrentServers.get(j)) == false) {
+				CurrentServers.get(j).writeMsg(js.toJSONString());
+			} else {
+				CurrentServers.get(j).writeMsg(
+						EncryptionUtil.encyrpt(js.toJSONString(), KeyList.get(CurrentServers.get(j))).toString());
+			}
 
 		}
 
 		for (int j = 0; j < AnonymousClients.size(); j++) {
-			AnonymousClients.get(j).writeMsg(js.toJSONString());
+			if (isNew.get(AnonymousClients.get(j)) == false) {
+				AnonymousClients.get(j).writeMsg(js.toJSONString());
+			} else {
+				AnonymousClients.get(j).writeMsg(
+						EncryptionUtil.encyrpt(js.toJSONString(), KeyList.get(AnonymousClients.get(j))).toString());
+			}
 
 		}
 
-		Iterator iter = CurrentClients.keySet().iterator();
+		Iterator iter = CurrentClients.values().iterator();
 		while (iter.hasNext()) {
 
-			Connection con = (Connection) iter.next();
-			con.writeMsg(js.toJSONString());
+			Connection co = (Connection) iter.next();
+			if (isNew.get(co) == false) {
+				co.writeMsg(js.toJSONString());
+			} else {
+				co.writeMsg(EncryptionUtil.encyrpt(js.toJSONString(), KeyList.get(co)).toString());
+			}
+
 		}
 	}
 
@@ -382,20 +547,34 @@ public class ControlSolution extends Control {
 
 		for (int j = 0; j < CurrentServers.size(); j++) {
 			if (!CurrentServers.get(j).equals(co)) {
-				CurrentServers.get(j).writeMsg(js.toJSONString());
+				if (isNew.get(CurrentServers.get(j)) == false) {
+					CurrentServers.get(j).writeMsg(obj.toJSONString());
+				} else {
+					CurrentServers.get(j).writeMsg(
+							EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(CurrentServers.get(j))).toString());
+				}
 			}
 
 		}
 		for (int j = 0; j < AnonymousClients.size(); j++) {
-			AnonymousClients.get(j).writeMsg(js.toJSONString());
+			if (isNew.get(AnonymousClients.get(j)) == false) {
+				AnonymousClients.get(j).writeMsg(js.toJSONString());
+			} else {
+				AnonymousClients.get(j).writeMsg(
+						EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(AnonymousClients.get(j))).toString());
+			}
 
 		}
 
-		Iterator iter = CurrentClients.keySet().iterator();
+		Iterator iter = CurrentClients.values().iterator();
 		while (iter.hasNext()) {
 
 			Connection con = (Connection) iter.next();
-			con.writeMsg(js.toJSONString());
+			if (isNew.get(co) == false) {
+				co.writeMsg(js.toJSONString());
+			} else {
+				co.writeMsg(EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(co)).toString());
+			}
 		}
 	}
 
@@ -406,14 +585,7 @@ public class ControlSolution extends Control {
 	 * @param obj
 	 */
 	private void ReceiveActivityBroadCast(Connection con, JSONObject obj) {
-		if (AllOtherServers.contains(con)) {
-			System.out.println("Received Activity Object is: " + obj.get("activity"));
-			sendActivityBroadcast(con, obj);
-
-		} else {
-			sendMessage(con, "INVALID_MESSAGE", "The server is not authenticated");
-			connectionClosed(con);
-		}
+		sendActivityBroadcast(con, obj);
 	}
 
 	/**
@@ -424,19 +596,109 @@ public class ControlSolution extends Control {
 	 */
 	private void ReceiveAuthenticate(Connection con, JSONObject obj) {
 
-		// this server is root server
-		if (obj.get("secret").equals(SSecret)) {
+		if (isNew.get(con) == true) {
+			int load = CurrentServers.size();
+			// this server is not a root server
+			if (obj.get("secret").equals(SSecret)) {
+				// not redirect
+				if (load < 2 || (load >= 2 && checkServerMinload().id == ID)) {
+					CurrentServers.add(con);
 
-			CurrentServers.add(con);
-		} else if (obj.get("secret").equals(Settings.getSecret())) {
-			SSecret = Settings.getSecret();
-			CurrentServers.add(con);
+					// send current alluser list to the new server to make every
+					// server
+					// in the same page
+					sendAuthenSuccess(con);
+				} else {
+					sendDoRedirectToServer(con);
+				}
+			} else if (obj.get("secret").equals(Settings.getSecret())) {
+				SSecret = Settings.getSecret();
+				CurrentServers.add(con);
+				sendAuthenSuccess(con);
+			} else {
+
+				sendMessage(con, "AUTHENTICATION_FAIL", "the supplied secret is incorrect:" + obj.get("secret"));
+				con.closeCon();
+			}
 		} else {
-
-			sendMessage(con, "AUTHENTICATION_FAIL", "the supplied secret is incorrect:" + obj.get("secret"));
-			con.closeCon();// should we consider close this thread?
+			if (obj.get("secret").equals(SSecret)) {
+				CurrentServers.add(con);
+			} else if (obj.get("secret").equals(Settings.getSecret())) {
+				SSecret = Settings.getSecret();
+				CurrentServers.add(con);
+			}
 		}
 
+	}
+
+	private void sendDoRedirectToServer(Connection con) {
+		// do redirect
+		ServerContent sc = checkServerMinload();
+		JSONObject o = new JSONObject();
+		o.put("command", "REDIRECT");
+		o.put("hostname", sc.hostname);
+		o.put("port", sc.port);
+		if (isNew.get(con) == false) {
+			con.writeMsg(o.toJSONString());
+		} else {
+			con.writeMsg(EncryptionUtil.encyrpt(o.toJSONString(), KeyList.get(con)).toString());
+		}
+		System.out.println("now to redirect to server!!!");
+
+	}
+
+	private void DoRedirect(Connection con, JSONObject obj) {
+		String hn = (String) obj.get("hostname");
+		int port = (int) (long) obj.get("port");
+		// clientSocket.close();
+		connectionClosed(con);
+		try {
+			outgoingConnection(new Socket(hn, port));
+		} catch (UnknownHostException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
+	}
+
+	// send current alluser list to the new server to make every server in the
+	// same page
+	private void sendAuthenSuccess(Connection con) {
+		JSONObject obj = new JSONObject();
+		obj.put("command", "AUTHENTICATE_SUCCESS");
+		// send all user list
+		JSONObject j = new JSONObject();
+		j.putAll(AllUserList);
+		obj.put("userlist", j);
+
+		// send back up server
+		obj.put("backuphost", backuphost);
+		obj.put("backupport", backupport);
+		if (isNew.get(con) == false) {
+			con.writeMsg(obj.toJSONString());
+		} else {
+			con.writeMsg(EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(con)).toString());
+		}
+	}
+
+	/*
+	 * receive userlist after send authenticate message
+	 */
+	private void ReceiveAuthenSuccess(Connection con, JSONObject obj) {
+
+		// update user list
+		JSONObject newUserlist = new JSONObject();
+		newUserlist = (JSONObject) obj.get("userlist");
+
+		AllUserList.putAll(newUserlist);
+
+		// set up back up host
+		backuphost = (String) obj.get("backuphost");
+		// backupport = (Integer)obj.get("backupport");
+		backupport = Integer.valueOf(((Long) obj.get("backupport")).toString());
 	}
 
 	private void sendMessage(Connection con, String command, String info) {
@@ -446,7 +708,11 @@ public class ControlSolution extends Control {
 		obj.put("info", info);
 
 		System.out.println("object is " + obj.toJSONString());
-		con.writeMsg(obj.toJSONString());
+		if (isNew.get(con) == false) {
+			con.writeMsg(obj.toJSONString());
+		} else {
+			con.writeMsg(EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(con)).toString());
+		}
 	}
 
 	/**
@@ -461,31 +727,38 @@ public class ControlSolution extends Control {
 			String username = (String) obj.get("username");
 			String secret = (String) obj.get("secret");
 			// check the connections exist or not
-			if (!(AllUserList.containsKey(username) && waitingClient[0].equals(username))) {
-				AllUserList.put(username, secret);
+			if (!AllUserList.containsKey(username) && !waitingClient.contains(username)) {
+
+				// AllUserList.put(username, secret);
+				waitingClient.add(username);
 				SendLockRequest(username, secret);
 
 				// waiting for response
 				try {
-					this.wait(5000);
+					this.wait(3000);
 				} catch (InterruptedException e) {
 					// TODO Auto-generated catch block
 					e.printStackTrace();
 				}
 				// chech the lock success or be denied
-				if ((counter + counter1) == AllOtherServers.size()) {
-					if (lockis == true) {
+
+				if (lockis == true) {
+					if ((counter + counter1) == AllOtherServers.size()) {
 						// log.info("Register 1 user:" + username);
+						waitingClient.remove(username);
+						AllUserList.put(username, secret);
 						sendMessage(con, "REGISTER_SUCCESS", "register success for " + username);
 
 					} else {
-						AllUserList.remove(username, secret);
-						sendMessage(con, "REGISTER_FAILED", "The username or secret you input has already exsited");
+						log.info("Not all server response in time");
+						waitingClient.remove(username);
+						AllUserList.put(username, secret);
+						sendMessage(con, "REGISTER_SUCCESS", "register success for " + username);
 					}
 				} else {
-					log.info("Not all server response in time");
+					waitingClient.remove(username);
+					sendMessage(con, "REGISTER_FAILED", "The username or secret you input has already exsited");
 
-					sendMessage(con, "REGISTER_SUCCESS", "register success for " + username);
 				}
 			} else
 				sendMessage(con, "REGISTER_FAILED", "The username or secret you input has already exsited");
@@ -498,55 +771,6 @@ public class ControlSolution extends Control {
 	/**
 	 * Login method
 	 */
-	// public void Login(Connection con, JSONObject obj) {
-	// // check the user need to be added
-	// boolean isAnon = false;
-	// String usern = (String) obj.get("username");
-	// String sec = (String) obj.get("secret");
-	//
-	// if ((usern.equals("anonymous") || usern.equals("Anonymous")) && sec ==
-	// null) {
-	// isAnon = true;
-	// } else {
-	// // check the message is valid or not
-	// if (usern != null && sec != null) {
-	// // check the user has already login or not
-	// if (AllUserList.containsKey(usern) && AllUserList.get(usern).equals(sec))
-	// {
-	//
-	// }
-	//
-	// } else {
-	// sendMessage(con, "INVALID_MESSAGE", "The username or secret you input is
-	// invalid");
-	// }
-	// }
-	//
-	// // check current server' load and
-	// if (CurrentClients.size() <= 2 || (CurrentClients.size() > 2 &&
-	// checkMinload().id == ID)) {
-	// // not do redirection
-	// if (isAnon == false) {
-	// CurrentClients.put(usern, con);
-	// sendMessage(con, "LOGIN_SUCCESS", "logged in as user " + usern);
-	//
-	// } else {
-	// AnonymousClients.add(con);
-	// sendMessage(con, "LOGIN_SUCCESS", "logged in as anonymous ");
-	// }
-	// } else {
-	// // do redirection
-	// ServerContent sc = checkMinload();
-	// JSONObject o = new JSONObject();
-	// o.put("command", "REDIRECT");
-	// o.put("hostname", sc.hostname);
-	// o.put("port", sc.port);
-	// con.writeMsg(o.toJSONString());
-	// System.out.println("now to redirect!!!");
-	//
-	// }
-	// }
-	//
 
 	public void Login(Connection con, JSONObject obj) {
 		int load = CurrentClients.size() + AnonymousClients.size();
@@ -555,17 +779,21 @@ public class ControlSolution extends Control {
 		if ((obj.get("username").equals("anonymous") || obj.get("username").equals("Anonymous"))
 				&& obj.get("secret") == null) {
 
-			if (load <= 2 || (load > 2 && checkMinload().id == ID)) {
+			if (load < 2 || (load >= 2 && checkClientMinload().id == ID)) {
 				AnonymousClients.add(con);
 				sendMessage(con, "LOGIN_SUCCESS", "logged in as anonymous");
 			} else {
 				// do redirect
-				ServerContent sc = checkMinload();
+				ServerContent sc = checkClientMinload();
 				JSONObject o = new JSONObject();
 				o.put("command", "REDIRECT");
 				o.put("hostname", sc.hostname);
 				o.put("port", sc.port);
-				con.writeMsg(o.toJSONString());
+				if (isNew.get(con) == false) {
+					con.writeMsg(o.toJSONString());
+				} else {
+					con.writeMsg(EncryptionUtil.encyrpt(o.toJSONString(), KeyList.get(con)).toString());
+				}
 				System.out.println("now to redirect!!!");
 			}
 		} else {
@@ -580,18 +808,25 @@ public class ControlSolution extends Control {
 					// check the user has alreay logged in or not
 					if (!CurrentClients.containsKey(usern)) {
 						// check load in order to redirect
-						if (load <= 2 || (load > 2 && checkMinload().id == ID)) {
+						if (load < 2 || (load >= 2 && checkClientMinload().id == ID)) {
 							CurrentClients.put(usern, con);
-							sendMessage(con, "LOGIN_SUCCESS", "logged in as anonymous");
+							sendMessage(con, "LOGIN_SUCCESS", "logged in with name " + usern);
+							System.out.println("not dirrect=======");
 						} else {
 							// do redirect
-							ServerContent sc = checkMinload();
+							System.out.println("now to redirect!!!");
+							ServerContent sc = checkClientMinload();
 							JSONObject o = new JSONObject();
 							o.put("command", "REDIRECT");
 							o.put("hostname", sc.hostname);
 							o.put("port", sc.port);
-							con.writeMsg(o.toJSONString());
-							System.out.println("now to redirect!!!");
+							if (isNew.get(con) == false) {
+								con.writeMsg(o.toJSONString());
+							} else {
+								con.writeMsg(EncryptionUtil.encyrpt(o.toJSONString(), KeyList.get(con)).toString());
+							}
+							CurrentClients.remove(usern, con);
+
 						}
 					} else {
 						sendMessage(con, "LOGIN_FAILED", "user has already logged");
@@ -609,31 +844,61 @@ public class ControlSolution extends Control {
 	}
 
 	// check there is a server with less load
-	private ServerContent checkMinload() {
+	private ServerContent checkClientMinload() {
 		System.out.println("doing search server with mininum number of load...");
 
 		Iterator iter = AllOtherServers.iterator();
 
-		ServerContent min = new ServerContent("", Integer.MAX_VALUE, "", 0);
-
-		int newLoad = Integer.MAX_VALUE;
+		ServerContent min = new ServerContent(ID, CurrentClients.size() + AnonymousClients.size(),
+				CurrentServers.size(), Settings.getLocalHostname(), Settings.getLocalPort());
 
 		while (iter.hasNext()) {
-
 			ServerContent temp = new ServerContent();
 			temp = (ServerContent) iter.next();
 			log.debug("the current obj is " + temp);
-			if ((temp.load <= (CurrentClients.size() - 2)) && (temp.load <= newLoad)) {
-				newLoad = temp.load;
+			// if ((temp.load < (CurrentClients.size() + AnonymousClients.size()
+			// - 2)) && (temp.load <= min.load)) {
+			if (temp.load < min.load) {
 				min.id = temp.id;
 				min.load = temp.load;
+				min.serverload = temp.serverload;
 				min.hostname = temp.hostname;
 				min.port = temp.port;
 
 			}
 		}
 
-		System.out.println("MIn is " + min.id + "  " + min.hostname + "  " + min.load + "  " + min.port);
+		System.out.println(
+				"MIn is " + min.id + "  " + min.hostname + "  " + min.load + "  " + min.serverload + "  " + min.port);
+		return min;
+	}
+
+	private ServerContent checkServerMinload() {
+		System.out.println("doing search server with mininum number of load...");
+
+		Iterator iter = AllOtherServers.iterator();
+
+		ServerContent min = new ServerContent(ID, CurrentClients.size() + AnonymousClients.size(),
+				CurrentServers.size(), Settings.getLocalHostname(), Settings.getLocalPort());
+
+		while (iter.hasNext()) {
+			ServerContent temp = new ServerContent();
+			temp = (ServerContent) iter.next();
+			log.debug("the current obj is " + temp);
+			// if ((temp.load < (CurrentClients.size() + AnonymousClients.size()
+			// - 2)) && (temp.load <= min.load)) {
+			if (temp.serverload < min.serverload) {
+				min.id = temp.id;
+				min.load = temp.load;
+				min.serverload = temp.serverload;
+				min.hostname = temp.hostname;
+				min.port = temp.port;
+
+			}
+		}
+
+		System.out.println(
+				"MIn is " + min.id + "  " + min.hostname + "  " + min.load + "  " + min.serverload + "  " + min.port);
 		return min;
 	}
 
@@ -643,12 +908,22 @@ public class ControlSolution extends Control {
 	 * 
 	 * @param con
 	 */
-	private void Logout(Connection con, JSONObject obj) {
-		if (CurrentClients.containsKey(obj.get("username"))) {
-			CurrentClients.remove(obj.get("username"));
-			connectionClosed(con);
+	private void Logout(Connection con) {
+
+		if (CurrentClients.contains(con)) {
+			Iterator it = CurrentClients.entrySet().iterator();
+
+			while (it.hasNext()) {
+				Map.Entry pair = (Map.Entry) it.next();
+				if ((Connection) pair.getValue() == con) {
+					con.closeCon();
+					it.remove();
+				}
+			}
+
 		}
 
+		System.out.println(CurrentClients.size() + "    SSSSSSSSS");
 	}
 
 	/**
@@ -656,15 +931,23 @@ public class ControlSolution extends Control {
 	 */
 	public void SendServerAnnounce() {
 
+		int clientload = CurrentClients.size() + AnonymousClients.size();
+		int serverload = CurrentServers.size();
 		JSONObject obj = new JSONObject();
 		obj.put("command", "SERVER_ANNOUNCE");
 		obj.put("id", ID);
-		obj.put("load", CurrentClients.size());
+		obj.put("load", clientload);
+		obj.put("serverload", serverload);
 		obj.put("hostname", Settings.getLocalHostname());
 		obj.put("port", Settings.getLocalPort());
 
 		for (int j = 0; j < CurrentServers.size(); j++) {
-			CurrentServers.get(j).writeMsg(obj.toJSONString());
+			if (isNew.get(CurrentServers.get(j)) == false) {
+				CurrentServers.get(j).writeMsg(obj.toJSONString());
+			} else {
+				CurrentServers.get(j).writeMsg(
+						EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(CurrentServers.get(j))).toString());
+			}
 		}
 
 	}
@@ -680,16 +963,27 @@ public class ControlSolution extends Control {
 
 		System.out.println("Receive Server Announce " + obj.toJSONString());
 		String id = (String) obj.get("id");
-
-		ServerContent sc = new ServerContent(id, Integer.parseInt(obj.get("load").toString()),
-				(String) obj.get("hostname"), Integer.parseInt(obj.get("port").toString()));
-		log.debug("The value of sc is " + sc.hostname + " " + sc.id + " " + sc.load + " " + sc.port);
+		ServerContent sc = new ServerContent();
+		
+//		if (isNew.get(con) == false||obj.size()==5) {
+		if(obj.size()==5){
+			sc = new ServerContent(id, Integer.parseInt(obj.get("load").toString()),
+					1, (String) obj.get("hostname"),
+					Integer.parseInt(obj.get("port").toString()));
+		} else {
+			sc = new ServerContent(id, Integer.parseInt(obj.get("load").toString()), Integer.parseInt(obj.get("serverload").toString()),
+					(String) obj.get("hostname"),
+					Integer.parseInt(obj.get("port").toString()));
+		}
+		log.debug("The value of sc is " + sc.hostname + " " + sc.id + " " + sc.load + " " + sc.serverload + " "
+				+ sc.port);
 
 		boolean added = false;
 		for (ServerContent Newsc : AllOtherServers) {
 			if (Newsc.id.equals(sc.id)) {
 				Newsc.id = sc.id;
 				Newsc.load = sc.load;
+				Newsc.serverload = sc.serverload;
 				Newsc.hostname = sc.hostname;
 				Newsc.port = sc.port;
 
@@ -703,10 +997,38 @@ public class ControlSolution extends Control {
 
 		for (int i = 0; i < CurrentServers.size(); i++) {
 			if (CurrentServers.get(i) != con) {
-				CurrentServers.get(i).writeMsg(obj.toJSONString());
+				if (isNew.get(CurrentServers.get(i)) == false) {
+					CurrentServers.get(i).writeMsg(obj.toJSONString());
+				} else {
+					CurrentServers.get(i).writeMsg(
+							EncryptionUtil.encyrpt(obj.toJSONString(), KeyList.get(CurrentServers.get(i))).toString());
+				}
 			}
 		}
 
+	}
+
+	/*
+	 * if server find it disconnect with its parent,it would send Redirect
+	 * message to others,included clients and servers
+	 */
+	public void ReConnect(Connection con) {
+
+		// check the connection is connected with parent node
+		if (con == parentCon) {
+			// if so, reconnect to root node
+			try {
+				System.out.println("New Connection！！！");
+				outgoingConnection(new Socket(backuphost, backupport));
+			} catch (UnknownHostException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+
+		}
 	}
 
 	/*

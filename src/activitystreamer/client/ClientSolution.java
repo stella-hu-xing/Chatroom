@@ -8,6 +8,14 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.net.UnknownHostException;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -15,7 +23,7 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
 
-import activitystreamer.server.Control;
+import activitystreamer.util.EncryptionUtil;
 import activitystreamer.util.Settings;
 
 public class ClientSolution extends Thread {
@@ -35,6 +43,11 @@ public class ClientSolution extends Thread {
 
 	private JSONParser parser = new JSONParser();
 
+	private KeyPair keys;
+	private PrivateKey privateKey;
+	private PublicKey publicKey;
+	private PublicKey serverKey;
+
 	// this is a singleton object
 	public static ClientSolution getInstance() throws UnknownHostException, IOException {
 		if (clientSolution == null) {
@@ -44,7 +57,7 @@ public class ClientSolution extends Thread {
 		return clientSolution;
 	}
 
-	public ClientSolution() throws UnknownHostException, IOException {
+	public ClientSolution() throws IOException, UnknownHostException {
 
 		textFrame = new TextFrame();
 
@@ -57,11 +70,13 @@ public class ClientSolution extends Thread {
 		out = new DataOutputStream(clientSocket.getOutputStream());
 		inreader = new BufferedReader(new InputStreamReader(in));
 		outwriter = new PrintWriter(out, true);
-		if (Secret == null && !(Username.equals("Anonymous") || Username.equals("anonymous"))) {
-			sendRegisterRequest();
-		} else
-			sendLoginRequest();
-		// start the client's thread
+
+		keys = EncryptionUtil.generateKey();
+		privateKey = keys.getPrivate();
+		publicKey = keys.getPublic();
+
+		sendPublicKey();
+
 		start();
 	}
 
@@ -73,14 +88,22 @@ public class ClientSolution extends Thread {
 	public void process(String data) {
 
 		JSONObject obj;
+
 		JSONParser parser = new JSONParser();
+
+		data = EncryptionUtil.decyrpt(data, privateKey).toString().trim();
+		
+		System.out.println("this time read: "+data);
+
 		try {
 			obj = (JSONObject) parser.parse(data);
-
 			String coms = (String) obj.get("command");
 			if (coms != null) {
 				switch (coms) {
 
+				case "ANSWER_PUBKEY":
+					ReceivepubKey(obj);
+					break;
 				case "INVALID_MESSAGE":
 					// disconnect();
 					break;
@@ -98,15 +121,7 @@ public class ClientSolution extends Thread {
 				case "REGISTER_SUCCESS":
 					textFrame.setOutputText(obj);
 
-					try {
-						sendLoginRequest();
-					} catch (UnknownHostException e1) {
-						// TODO Auto-generated catch block
-						e1.printStackTrace();
-					} catch (IOException e1) {
-						// TODO Auto-generated catch block
-						e1.printStackTrace();
-					}
+					sendLoginRequest();
 
 					break;
 
@@ -117,23 +132,19 @@ public class ClientSolution extends Thread {
 
 				case "REDIRECT":
 					textFrame.setOutputText(obj);
-					try {
-						DoRedirect(obj);
-					} catch (IOException e) {
-						// TODO Auto-generated catch block
-						e.printStackTrace();
-					}
+
+					DoRedirect(obj);
+
 					break;
 
 				case "ACTIVITY_BROADCAST":
 					textFrame.setOutputText(obj);
 					break;
 				}
-
 			} else {
 				// log.info("receive invalid message" + obj.toJSONString());
 			}
-		} catch (ParseException e) {
+		} catch (ParseException | IOException e) {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
@@ -148,6 +159,48 @@ public class ClientSolution extends Thread {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
+	}
+
+	// at the first stage, send the public key to server
+	private void sendPublicKey() {
+
+		String encodedKey = Base64.getEncoder().encodeToString(publicKey.getEncoded());
+
+		JSONObject obj = new JSONObject();
+		obj.put("command", "REQUEST_PUBKEY");
+		obj.put("publickey", encodedKey);
+
+		outwriter.println(obj.toJSONString());
+		outwriter.flush();
+
+	}
+
+	private void ReceivepubKey(JSONObject obj) throws UnknownHostException, IOException {
+
+		String key = (String) obj.get("publickey");
+
+		byte[] publicBytes = Base64.getDecoder().decode(key);
+
+		X509EncodedKeySpec keySpec = new X509EncodedKeySpec(publicBytes);
+
+		KeyFactory keyFactory;
+
+		try {
+			keyFactory = KeyFactory.getInstance("RSA");
+
+			serverKey = keyFactory.generatePublic(keySpec);
+
+			if (Secret == null && !(Username.equals("Anonymous") || Username.equals("anonymous"))) {
+				sendRegisterRequest();
+
+			} else
+				sendLoginRequest();
+
+		} catch (NoSuchAlgorithmException | InvalidKeySpecException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
 	}
 
 	/**
@@ -176,9 +229,12 @@ public class ClientSolution extends Thread {
 		textFrame.setVisible(false);
 		JSONObject object = new JSONObject();
 		object.put("command", "LOGOUT");
-		outwriter.println(object.toJSONString());
+		// outwriter.println(object.toJSONString());
+		outwriter.println(EncryptionUtil.encyrpt(object.toJSONString(), serverKey).toString());
 		outwriter.flush();
-		clientSocket.close();
+		// clientSocket.close();
+		inreader.close();
+		outwriter.close();
 
 	}
 
@@ -196,7 +252,7 @@ public class ClientSolution extends Thread {
 			log.info("Secret for " + Username + " is " + Secret);
 			obj.put("secret", Secret);
 
-			outwriter.println(obj.toJSONString());
+			outwriter.println(EncryptionUtil.encyrpt(obj.toJSONString(), serverKey).toString());
 			outwriter.flush();
 
 		}
@@ -215,7 +271,8 @@ public class ClientSolution extends Thread {
 
 		}
 		System.out.println(clientSocket.getPort());
-		outwriter.println(obj.toJSONString());
+		// outwriter.println(obj.toJSONString());
+		outwriter.println(EncryptionUtil.encyrpt(obj.toJSONString(), serverKey).toString());
 		outwriter.flush();
 	}
 
@@ -228,7 +285,8 @@ public class ClientSolution extends Thread {
 		obj.put("secret", Secret);
 		obj.put("activity", activityObj);
 
-		outwriter.println(obj.toJSONString());
+		// outwriter.println(obj.toJSONString());
+		outwriter.println(EncryptionUtil.encyrpt(obj.toString(), serverKey).toString());
 		outwriter.flush();
 	}
 
@@ -241,13 +299,6 @@ public class ClientSolution extends Thread {
 			while ((data = inreader.readLine()) != null) {
 				System.out.println("received:" + data);
 				process(data);
-				try {
-					JSONObject obj = (JSONObject) parser.parse(data);
-
-				} catch (ParseException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
 
 			}
 		} catch (IOException e) {
