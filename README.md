@@ -1,5 +1,5 @@
-# ActivityStream
-First distributed system project 
+# Chatroom 
+First distributed system project of implementing a chatroom for multiple users to communicate with each other.
 
 user manual:
 
